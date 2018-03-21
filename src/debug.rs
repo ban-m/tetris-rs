@@ -1,20 +1,59 @@
+#![feature(slice_patterns)]
 extern crate rand;
+extern crate termios;
 mod tetris;
 use std::thread;
 use std::time;
-use rand::{Rng,thread_rng};
-const INTERVAL:u32= 1000_000_000;
+use termios::{Termios, TCSANOW, ECHO, ICANON, tcsetattr};
+use std::io::Read;
+use std::io;
 use tetris::Command;
+use std::sync::mpsc;
 fn main(){
-    //let choice = [Command::Down,Command::MoveLeft,Command::MoveRight,Command::Reserve,Command::Rotate];
-    let choice = [Command::Rotate];
-    let mut tetris = tetris::Tetris::new(40,40);
-    let mut rng = thread_rng();
-    for _ in 0 .. 10{
-        thread::sleep(time::Duration::new(0,INTERVAL));
-        tetris = tetris.tic();
-        let command = rng.choose(&choice).unwrap_or(&Command::Down);
-        tetris = tetris.update(*command);
+    let (tx,rx) = mpsc::channel();
+    thread::spawn(move ||{
+        let stdin = 0;
+        let termios = Termios::from_fd(stdin).unwrap();
+        let mut new_termios = termios.clone();  // make a mutable copy of termios 
+        // that we will modify
+        new_termios.c_lflag &= !(ICANON | ECHO); // no echo and canonical mode
+        tcsetattr(stdin, TCSANOW, &mut new_termios).unwrap();
+        let mut reader = io::stdin();
+        let mut buf1 = [0;1];
+        loop{
+            if let Ok(_) = reader.read_exact(&mut buf1){
+                if let Some(command) = Command::parse_command(buf1[0]){
+                    if let Err(_) =  tx.send(command){
+                        break;
+                    }
+                    if let Command::Quite = command{
+                        break;
+                    }
+                }
+            }
+        }
+        tcsetattr(stdin, TCSANOW, & termios).unwrap();  // reset the stdin to
+    });
+    let mut tetris = tetris::Tetris::new(20,20);
+    let sleep = 500;
+    'main: loop{
         println!("{}",tetris);
+        tetris = tetris.interval_update();
+        let start = time::Instant::now();
+        while let Ok(command) = rx.try_recv(){
+            match command {
+                Command::Down | Command::Immd | Command::MoveLeft |
+                Command::MoveRight | Command::Reserve | Command::Rotate
+                    => tetris = tetris.update(command),
+                Command::Quite => break 'main,
+                _ => {},
+            };
+            println!("{}",tetris);
+        }
+        let end = time::Instant::now();
+        eprintln!("cycle elapled:{:?}",end - start);
+        if end - start < time::Duration::from_millis(sleep){
+            thread::sleep(time::Duration::from_millis(sleep) + (end- start));
+        }
     }
 }

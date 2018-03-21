@@ -9,22 +9,25 @@ pub struct Tetris{
     next:Block,
     reserve:Block,
     current:(Block,Position),
-    board:Vec<(Block,Position)>,
+    board:Vec<Vec<Output>>,
     user_status:User,
 }
 
 impl fmt::Display for Tetris{
     fn fmt(&self,f:&mut fmt::Formatter)-> fmt::Result{
         // clear the screen
-        println!("\x1b[1;1H");
-        println!("\x1b[J");
+        writeln!(f,"\x1b[1;1H")?;
+        writeln!(f,"\x1b[J")?;
         // print various desctiption
         writeln!(f,"width:{},heigth:{},next:{},reserve:{},current:({},{}),board:{},user:{}",
                  self.width,self.height,self.next,self.reserve,
                  (self.current).0,(self.current).1,(self.board).len(),self.user_status)?;
-        let board = self.create_board();
+        let board = self.board.clone();
+        let current:Vec<_> = self.current.0.get_location_by(&self.current.1).into_iter()
+            .map(|(x,y,_)|(x,y,Output::with_shape('#','b'))).collect();
+        let board = Tetris::add(board,&current);
         for line in board{
-            for element in line{
+            for element in line.iter(){
                 write!(f,"{}",element)?;
             }
             writeln!(f,"")?;
@@ -37,9 +40,8 @@ impl fmt::Debug for Tetris{
         writeln!(f,"width:{},height{},next:{},reserve:{},current:({},{}),board:{},user:{}",
                  self.width,self.height,self.next,self.reserve,
                  (self.current).0,(self.current).1,(self.board).len(),self.user_status)?;
-        for &(ref b,ref p) in &self.board{
-            writeln!(f,"{},{:?}",b,p)?;
-        }
+        writeln!(f,"occupied cell:{}",
+                 self.board.iter().flat_map(|e|e.iter()).filter(|e|e.not_default()).count())?;
         Ok(())
     }
 }
@@ -50,34 +52,58 @@ impl Tetris{
         let reserve = Block::new();
         let current = (Block::T,Position::create_at(width/2,3));
         let user_status = User::new();
-        let board = vec![];
+        let board = vec![vec![Output::new();width];height];
         Tetris{width,height,next,reserve,current,board,user_status}
     }
-    pub fn tic(self)->Self{
-        let (block,position) = self.current;
-        let new_position = position.tic();
-        let result:Vec<_> = block
-            .update_location(&new_position)
-            .into_iter().map(|(x,y,_)|(x,y)).collect();
-        let in_range = result.iter()
-            .all(|&(x,y)|x < self.width  && y < self.height);
-        let not_collide = result.iter()
-            .all(|&(x,y)|!self.does_collide(x,y));
-        if in_range && not_collide{
-            // keep current block
-            Tetris{current:(block,new_position),..self}
+    pub fn interval_update(self)->Self{
+        self.apply(Command::Down).unwrap_or_else(|e|e.next_block()).resolve()
+    }
+    fn next_block(self)->Self{
+        let position = Position::create_at(self.width/2,3);
+        let block = self.next;
+        let next = Block::new();
+        let board = Tetris::add(self.board,&self.current.0.get_location_by(&self.current.1));
+        Tetris{current:(block,position),next:next,board:board,..self}
+    }
+    fn resolve(self)->Self{
+        let board:Vec<_> = self.board.iter()
+            .filter_map(|e|Tetris::line_resolve(e,self.width)).collect();
+        let mut padding = vec![vec![Output::new();self.width];self.height - board.len()];
+        if padding.len() > 0{
+            padding.extend(board);
+            Tetris{board:padding,..self}
         }else{
-            // Already settled. Next block.
-            let mut board = self.board;
-            board.push(self.current);
-            let position = Position::create_at(self.width/2,3);
-            let block = self.next;
-            let next = Block::new();
-            Tetris{current:(block,position),next:next,board:board,..self}
+            Tetris{board:board,..self}
         }
     }
+    fn line_resolve(line:&[Output],width:usize)->Option<Vec<Output>>{
+        if line.iter().skip(3).take(width-6).all(|e|e.not_default()){
+            None
+        }else{
+            Some(line.iter().map(|&e|e).collect())
+        }
+    }
+    fn add(mut board:Vec<Vec<Output>>,location:&[(usize,usize,Output)])->Vec<Vec<Output>>{
+        for &(x,y,output) in location{
+            board[y][x] = output;
+        }
+        board
+    }
     pub fn update(self,command:Command)->Self{
-        self.apply(command).unwrap_or_else(|e|e)
+        self.apply(command).unwrap_or_else(|e|e).resolve()
+    }
+    fn in_range(&self,location:&[(usize,usize,Output)])->bool{
+        location.iter()
+            .all(|&(x,y,_)|self.width > x + 2 && self.height > y + 2 && x > 2 )
+    }
+    fn not_collide(&self,location:&[(usize,usize,Output)])->bool{
+        location.iter()
+            .all(|&(x,y,_)|!self.does_collide(x,y))
+    }
+    fn does_collide(&self,x:usize,y:usize)->bool{
+        (0..self.height).flat_map(|y|(0..self.width).map(move |x|(x,y)))
+            .filter(|&(x,y)|self.board[y][x].not_default())
+            .any(|(s,t)| x == s && y == t)
     }
     fn apply(mut self,command:Command)->Result<Self,Self>{
         match command {
@@ -85,15 +111,8 @@ impl Tetris{
             Command::Rotate => {
                 let (block,position) = self.current;
                 let position = position.rotate();
-                let result:Vec<_> = block
-                    .update_location(&position)
-                    .into_iter().map(|(x,y,_)|(x,y))
-                    .collect();
-                let in_range = result.iter()
-                    .all(|&(x,y)|self.width > x && self.height > y);
-                let not_collide = result.iter()
-                    .all(|&(x,y)|!self.does_collide(x,y));
-                if in_range && not_collide{                    
+                let result:Vec<_> = block.get_location_by(&position);
+                if self.in_range(&result) && self.not_collide(&result){
                     self.current = (block,position);
                     Ok(self)
                 }else{
@@ -101,7 +120,7 @@ impl Tetris{
                 }
             },
             Command::MoveRight | Command::MoveLeft | Command::Down => 
-                if self.is_valid(&command){
+                if self.is_valid_after(&command){
                     let (block,position) = self.current;
                     let position = position.move_by(&command);
                     self.current = (block,position);
@@ -115,36 +134,16 @@ impl Tetris{
                 self.reserve = current;
                 Ok(self)
             }
+            _ => unreachable!(),
         }
     }
     fn immediatly(self)->Self{
         self
     }
-    fn does_collide(&self,x:usize,y:usize)->bool{
-        self.board.iter()
-            .flat_map(|e|(e.0).update_location(&e.1).into_iter())
-            .map(|(x,y,_)|(x,y))
-            .any(|(s,t)| x == s && y == t)
-    }
-    fn is_valid(&self,command:&Command)->bool{
+    fn is_valid_after(&self,command:&Command)->bool{
         let position = self.current.1.move_by(command);
-        let positions = self.current.0.update_location(&position);
-        let positions:Vec<_> = positions.into_iter().map(|e|(e.0,e.1)).collect();
-        let not_collide = positions.iter()
-            .all(|&(x,y)|!self.does_collide(x,y));
-        let in_range = positions.iter().all(|&(x,y)| x < self.width && 0 < x && y < self.height);
-        in_range && not_collide
-    }
-    fn new_block(&self)-> (Block,Position){
-        let position = Position::create_at(self.width/2,self.height);
-        let block = Block::new();
-        (block,position)
-    }
-    fn create_board(&self)->Vec<Vec<Output>>{
-        self.board.iter()
-            .chain([self.current.clone()].iter())
-            .fold(vec![vec![Output::new();self.width];self.height],
-                  |acc,&(ref block,position)|block.update(&position,acc))
+        let positions = self.current.0.get_location_by(&position);
+        self.in_range(&positions) && self.not_collide(&positions)
     }
 }
 #[derive(Debug,Clone,Copy)]
@@ -155,6 +154,23 @@ pub enum Command{
     MoveLeft,
     Down,
     Reserve,
+    NoOp,
+    Quite,
+}
+
+impl Command{
+    pub fn parse_command(buffer:u8)->Option<Self>{
+        match buffer{
+            119 => Some(Command::Immd),
+            115 => Some(Command::Down),
+            100 => Some(Command::MoveRight),
+            97 => Some(Command::MoveLeft),
+            113 => Some(Command::Quite),
+            106 => Some(Command::Rotate),
+            107 => Some(Command::Reserve),
+            _ => Some(Command::NoOp),
+        }
+    }
 }
 
 #[derive(Copy,Clone)]
@@ -169,23 +185,17 @@ enum Block{
 }
 
 impl Block{
-    fn update(&self,position:&Position,mut board:Vec<Vec<Output>>)->Vec<Vec<Output>>{
-        for (x,y,output) in self.update_location(position){
-            board[y][x] = output;
-        }
-        board
-    }
     fn new()->Self{
         let mut rng = thread_rng();
         *rng.choose(&BLOCKS).unwrap_or(&Block::I)
     }
-    fn update_location(&self,position:&Position)->Vec<(usize,usize,Output)>{
+    fn get_location_by(&self,position:&Position)->Vec<(usize,usize,Output)>{
         use self::Block::*;
         use self::Angle::*;
         let angle = position.angle;
         let x = position.x;
         let y = position.y;
-        let create = |x,y| (x,y,Output{shape:'#',color:'b'});
+        let create = |x,y| (x,y,Output::with_shape('O','b'));
         match (*self,angle){
             (I,Up)   => vec![create(x,y),create(x,y+1),create(x,y-1),create(x,y-2)],
             (I,Down) => vec![create(x,y),create(x,y-1),create(x,y+1),create(x,y+2)],
@@ -240,9 +250,6 @@ struct Position{
     angle:Angle
 }
 impl Position{
-    fn new()->Self{
-        Position{y:10,x:10,angle:Angle::Up}
-    }
     fn create_at(x:usize,y:usize)->Self{
         let mut rng = thread_rng();
         let angle = rng.choose(&ANGLES).unwrap_or(&Angle::Up);
@@ -258,9 +265,6 @@ impl Position{
             Command::MoveLeft => Position{x:self.x-1,..self},
             _ => unreachable!(),
         }
-    }
-    fn tic(&self)->Self{
-        Position{y:self.y+1,..*self}
     }
 }
 impl fmt::Display for Position{
@@ -329,9 +333,17 @@ impl Output{
     fn with_shape(shape:char,color:char)->Self{
         Output{shape,color}
     }
+    fn not_default(&self)->bool{
+        self.shape != ' '  || self.color != ' '
+    }
+           
 }
 impl fmt::Display for Output{
     fn fmt(&self,f:&mut fmt::Formatter)->fmt::Result{
-        write!(f,"{}",self.shape)
+        if self.not_default(){
+            write!(f,"\x1b[41m{}\x1b[m",self.shape)
+        }else{
+            write!(f,"{}",self.shape)
+        }
     }
 }

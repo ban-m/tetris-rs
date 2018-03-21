@@ -13,12 +13,12 @@ git clone
 cargo run --release
 ```
 
-+ right: move right
-+ left: move left
-+ down: down
-+ up: set immediately
-+ x: reserve current block
-+ c: right rotate
-+ z: quite
++ d: move right
++ a: move left
++ s: down
++ w: set immediately
++ k: reserve current block
++ j: right rotate
++ q: quite
 
 左右がわからないので、右と左の動きが逆の可能性あり。
